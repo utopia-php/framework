@@ -130,6 +130,25 @@ class Response
         self::STATUS_CODE_HTTP_VERSION_NOT_SUPPORTED       => 'HTTP Version Not Supported',
     ];
 
+    /**
+     * Mime Types
+     *  with compression support
+     * 
+     * @var array
+     */
+    protected $compressed = [
+        'text/plain' => true,
+        'text/css' => true,
+        'text/javascript' => true,
+        'application/javascript' => true,
+        'text/html' => true,
+        'text/html; charset=UTF-8' => true,
+        'application/json' => true,
+        'application/json; charset=UTF-8' => true,
+        'image/svg+xml' => true,
+        'application/xml+rss' => true,
+    ];
+
     const COOKIE_SAMESITE_NONE      = 'None';
     const COOKIE_SAMESITE_STRICT    = 'Strict';
     const COOKIE_SAMESITE_LAX       = 'Lax';
@@ -374,11 +393,10 @@ class Response
      * Generate HTTP response output including the response header (+cookies) and body and prints them.
      *
      * @param string $body
-     * @param int $exit exit code or don't exit if code is null
      *
      * @return void
      */
-    public function send(string $body = '', int $exit = null): void
+    public function send(string $body = ''): void
     {
         if($this->sent) {
             return;
@@ -394,15 +412,75 @@ class Response
         ;
 
         if (!$this->disablePayload) {
-            $this->size = $this->size + \mb_strlen(\implode("\n", \headers_list())) + \mb_strlen($body, '8bit');
+            $chunk = 2000000; // Max chunk of 2 mb
+            $length = strlen($body);
 
-            echo $body;
+            $this->size = $this->size + strlen(implode("\n", $this->headers)) + $length;
+
+            if(array_key_exists(
+                $this->contentType,
+                $this->compressed
+                ) && ($length <= $chunk)) { // Dont compress with GZIP / Brotli if header is not listed and size is bigger than 2mb
+                $this->end($body);
+            }
+            else {
+                for ($i=0; $i < ceil($length / $chunk); $i++) {
+                    $this->write(substr($body, ($i * $chunk), min($chunk, $length - ($i * $chunk))));
+                }
+
+                $this->end();
+            }
 
             $this->disablePayload();
         }
+    }
 
-        if (!\is_null($exit)) {
-            exit($exit); // Exit with code
+    protected function write($content) {
+        echo $content;
+    }
+
+    protected function end($content = null)
+    {
+        if(!is_null($content)) {
+            echo $content;
+        }
+    }
+
+    /**
+     * Output response
+     *
+     * Generate HTTP response output including the response header (+cookies) and body and prints them.
+     *
+     * @param string $body
+     * @param bool $last
+     *
+     * @return void
+     */
+    public function chunk(string $body = '', bool $end = false): void
+    {
+        if ($this->sent) {
+            return;
+        }
+
+        if ($end) {
+            $this->sent = true;
+        }
+
+        $this->addHeader('X-Debug-Speed', (string) (microtime(true) - $this->startTime));
+
+        $this
+            ->appendCookies()
+            ->appendHeaders()
+        ;
+
+        if (!$this->disablePayload) {
+            $this->write($body);
+            if ($end) {
+                $this->disablePayload();
+                $this->end();
+            }
+        } else {
+            $this->end();
         }
     }
 
@@ -417,7 +495,7 @@ class Response
     protected function appendHeaders(): self
     {
         // Send status code header
-        \http_response_code($this->statusCode);
+        $this->addHeader('status', $this->statusCode);
 
         // Send content type header
         if (!empty($this->contentType)) {
@@ -428,10 +506,30 @@ class Response
 
         // Set application headers
         foreach ($this->headers as $key => $value) {
-            \header($key . ': ' . $value);
+            $this->sendHeader($key, $value);
         }
 
         return $this;
+    }
+
+    protected function sendHeader(string $key, string $value)
+    {
+        \header($key . ': ' . $value);
+    }
+
+    protected function sendCookie(array $cookie) {
+        if (\version_compare(PHP_VERSION, '7.3.0', '<')) {
+            \setcookie($cookie['name'], $cookie['value'], $cookie['expire'], $cookie['path'], $cookie['domain'], $cookie['secure'], $cookie['httponly']);
+        } else {
+            \setcookie($cookie['name'], $cookie['value'], [
+                'expires' => $cookie['expire'],
+                'path' => $cookie['path'],
+                'domain' => $cookie['domain'],
+                'secure' => $cookie['secure'],
+                'httponly' => $cookie['httponly'],
+                'samesite' => $cookie['samesite'],
+            ]);
+        }
     }
 
     /**
@@ -444,18 +542,7 @@ class Response
     protected function appendCookies(): self
     {
         foreach ($this->cookies as $cookie) {
-            if (\version_compare(PHP_VERSION, '7.3.0', '<')) {
-                \setcookie($cookie['name'], $cookie['value'], $cookie['expire'], $cookie['path'], $cookie['domain'], $cookie['secure'], $cookie['httponly']);
-            } else {
-                \setcookie($cookie['name'], $cookie['value'], [
-                    'expires' => $cookie['expire'],
-                    'path' => $cookie['path'],
-                    'domain' => $cookie['domain'],
-                    'secure' => $cookie['secure'],
-                    'httponly' => $cookie['httponly'],
-                    'samesite' => $cookie['samesite'],
-                ]);
-            }
+            $this->sendCookie($cookie);
         }
 
         return $this;
